@@ -1,0 +1,66 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<title>The Typewriter of Trieste</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<canvas id="canvas"></canvas>
+
+<div id="hud" class="hidden">
+  <div class="hud-left">
+    <span id="hud-place">Trieste, 1909</span>
+    <span class="hud-sep">·</span>
+    <span id="hud-money">1 K</span>
+  </div>
+  <div class="hud-right">
+    <button id="btn-journal" title="Journal (J)">Journal <kbd>J</kbd></button>
+    <button id="btn-inventory" title="Pockets (I)">Pockets <kbd>I</kbd></button>
+  </div>
+</div>
+
+<div id="prompt" class="hidden"></div>
+
+<div id="dialogue" class="hidden">
+  <div id="dlg-portrait"></div>
+  <div id="dlg-body">
+    <div id="dlg-header">
+      <span id="dlg-name"></span>
+      <span id="dlg-lang" class="lang-chip"></span>
+    </div>
+    <div id="dlg-text"></div>
+    <div id="dlg-choices"></div>
+    <div id="dlg-continue" class="hidden">▸ <span>continue</span></div>
+  </div>
+</div>
+
+<div id="journal" class="panel hidden">
+  <h2>Journal</h2>
+  <div id="journal-entries"></div>
+  <div id="journal-reps"></div>
+  <div class="panel-hint">J or Esc to close</div>
+</div>
+
+<div id="inventory" class="panel hidden">
+  <h2>Your Pockets</h2>
+  <div id="inv-items"></div>
+  <div class="panel-hint">I or Esc to close</div>
+</div>
+
+<div id="toasts"></div>
+
+<div id="fader"></div>
+
+<div id="overlay">
+  <!-- title / intro / end card injected here -->
+</div>
+
+<script src="js/portraits.js"></script>
+<script src="js/data.js"></script>
+<script src="js/maps.js"></script>
+<script src="js/game.js"></script>
+</body>
+</html>
