@@ -23,10 +23,16 @@ let state = {
 const player = {
   x: (PLAYER_SPAWN.x + 0.5) * TILE,
   y: (PLAYER_SPAWN.y + 0.5) * TILE,
+  vx: 0, vy: 0,
   dir: 's',
   moving: false,
   baseSpeed: 185,
 };
+
+/* click-to-move state */
+let path = null;           // array of {x,y} tile waypoints
+let pendingAction = null;  // what to do on arrival ({kind:'npc'|'hotspot', ...})
+let clickMarker = null;    // fading ring where the player clicked
 
 let mode = 'title';        // title | intro | play | dialogue | panel | end
 let transitioning = false;
@@ -537,11 +543,15 @@ const gulls = Array.from({ length: 5 }, (_, i) => ({
 /* ---------------- camera & render ---------------- */
 function currentMap() { return MAPS[state.map]; }
 
+/* the camera trails the player slightly */
+const cam = { x: player.x, y: player.y };
+function snapCamera() { cam.x = player.x; cam.y = player.y; }
+
 function camera() {
   const map = currentMap();
   const mw = map.w * TILE, mh = map.h * TILE;
-  let cx = player.x - viewW / 2;
-  let cy = player.y - viewH / 2;
+  let cx = cam.x - viewW / 2;
+  let cy = cam.y - viewH / 2;
   cx = mw <= viewW ? (mw - viewW) / 2 : Math.max(0, Math.min(mw - viewW, cx));
   cy = mh <= viewH ? (mh - viewH) / 2 : Math.max(0, Math.min(mh - viewH, cy));
   return { cx, cy };
@@ -605,6 +615,20 @@ function render(t) {
   });
   ents.sort((a, b) => a.y - b.y);
   for (const e of ents) e.draw();
+
+  // where the player clicked: a fading ring
+  if (clickMarker) {
+    const age = (performance.now() - clickMarker.t0) / 700;
+    if (age >= 1) clickMarker = null;
+    else {
+      ctx.strokeStyle = `rgba(243,233,210,${0.85 * (1 - age)})`;
+      ctx.lineWidth = 2;
+      const r = 5 + age * 11;
+      ctx.beginPath();
+      ctx.ellipse(clickMarker.x, clickMarker.y, r, r * 0.5, 0, 0, 7);
+      ctx.stroke();
+    }
+  }
 
   // gulls over the sea
   if (map.id === 'city') {
@@ -673,23 +697,118 @@ function passable(px, py) {
   return true;
 }
 
-function update(dt, t) {
-  if (mode !== 'play' || transitioning) { player.moving = false; return; }
+/* ---------- pathfinding (BFS, 8-way, no corner cutting) ---------- */
+const DIRS8 = [[1, 0], [-1, 0], [0, 1], [0, -1], [1, 1], [1, -1], [-1, 1], [-1, -1]];
 
+function findPath(map, sx, sy, goalFn) {
+  const W = map.w, H = map.h;
+  const key = (x, y) => y * W + x;
+  const prev = new Int32Array(W * H).fill(-1);
+  const seen = new Uint8Array(W * H);
+  const walk = (x, y) => x >= 0 && y >= 0 && x < W && y < H && !SOLID_TILES.has(map.grid[y][x]);
+  if (!walk(sx, sy)) return null;
+  const q = [[sx, sy]];
+  seen[key(sx, sy)] = 1;
+  let goal = null;
+  while (q.length) {
+    const [x, y] = q.shift();
+    if (goalFn(x, y)) { goal = [x, y]; break; }
+    for (const [dx, dy] of DIRS8) {
+      const nx = x + dx, ny = y + dy;
+      if (!walk(nx, ny) || seen[key(nx, ny)]) continue;
+      if (dx && dy && (!walk(x + dx, y) || !walk(x, y + dy))) continue;
+      seen[key(nx, ny)] = 1;
+      prev[key(nx, ny)] = key(x, y);
+      q.push([nx, ny]);
+    }
+  }
+  if (!goal) return null;
+  const out = [];
+  let k = key(goal[0], goal[1]);
+  const start = key(sx, sy);
+  while (k !== start && k >= 0) {
+    out.push({ x: k % W, y: (k / W) | 0 });
+    k = prev[k];
+  }
+  out.reverse();
+  return out;
+}
+
+/* walk to within `rad` (Chebyshev) of a tile, then run `action` */
+function walkTo(tx, ty, action, rad) {
+  const map = currentMap();
+  const sx = Math.floor(player.x / TILE), sy = Math.floor(player.y / TILE);
+  const goal = (x, y) => Math.max(Math.abs(x - tx), Math.abs(y - ty)) <= rad;
+  const p = findPath(map, sx, sy, goal);
+  if (!p) return false;
+  path = p;
+  pendingAction = action || null;
+  if (!p.length) resolveArrival();
+  return true;
+}
+
+function resolveArrival() {
+  path = null;
+  const act = pendingAction;
+  pendingAction = null;
+  if (!act) return;
+  if (act.kind === 'npc') {
+    const n = act.npc;
+    const d = Math.hypot((n.x + 0.5) * TILE - player.x, (n.y + 0.5) * TILE - player.y);
+    if (d < (n.range || 1.6) * TILE + TILE * 0.8) interactWith({ kind: 'npc', npc: n });
+  } else if (act.kind === 'hotspot') {
+    openNarration(act.hot.text);
+  }
+}
+
+function update(dt, t) {
+  if (mode !== 'play' || transitioning) {
+    player.moving = false;
+    player.vx = player.vy = 0;
+    return;
+  }
+
+  const speed = hasItem('typewriter') ? player.baseSpeed * 0.66 : player.baseSpeed;
   let dx = 0, dy = 0;
   if (keys['w'] || keys['arrowup']) dy -= 1;
   if (keys['s'] || keys['arrowdown']) dy += 1;
   if (keys['a'] || keys['arrowleft']) dx -= 1;
   if (keys['d'] || keys['arrowright']) dx += 1;
-  player.moving = !!(dx || dy);
-  if (player.moving) {
+
+  // keyboard always overrides a clicked path
+  if (dx || dy) { path = null; pendingAction = null; clickMarker = null; }
+
+  // desired velocity: from keys, or from the next waypoint
+  let tvx = 0, tvy = 0;
+  if (dx || dy) {
     const len = Math.hypot(dx, dy);
-    const speed = hasItem('typewriter') ? player.baseSpeed * 0.66 : player.baseSpeed;
-    const nx = player.x + (dx / len) * speed * dt;
-    const ny = player.y + (dy / len) * speed * dt;
-    if (passable(nx, player.y)) player.x = nx;
-    if (passable(player.x, ny)) player.y = ny;
+    tvx = (dx / len) * speed;
+    tvy = (dy / len) * speed;
+  } else if (path && path.length) {
+    const wp = path[0];
+    const wx = (wp.x + 0.5) * TILE, wy = (wp.y + 0.5) * TILE;
+    const ddx = wx - player.x, ddy = wy - player.y;
+    const d = Math.hypot(ddx, ddy);
+    if (d < 6) {
+      path.shift();
+      if (!path.length) resolveArrival();
+    } else {
+      tvx = (ddx / d) * speed;
+      tvy = (ddy / d) * speed;
+    }
   }
+
+  // momentum: ease current velocity toward the desired one
+  const k = Math.min(1, dt * 11);
+  player.vx += (tvx - player.vx) * k;
+  player.vy += (tvy - player.vy) * k;
+  if (Math.hypot(player.vx, player.vy) > 4) {
+    const nx = player.x + player.vx * dt;
+    const ny = player.y + player.vy * dt;
+    if (passable(nx, player.y)) player.x = nx; else player.vx = 0;
+    if (passable(player.x, ny)) player.y = ny; else player.vy = 0;
+  }
+  player.moving = Math.hypot(player.vx, player.vy) > 25;
 
   // door?
   const map = currentMap();
@@ -711,10 +830,13 @@ function travel(door) {
   hidePrompt();
   const fader = document.getElementById('fader');
   fader.classList.add('active');
+  path = null; pendingAction = null; clickMarker = null;
   setTimeout(() => {
     state.map = door.map;
     player.x = (door.x + 0.5) * TILE;
     player.y = (door.y + 0.5) * TILE;
+    player.vx = player.vy = 0;
+    snapCamera();
     updateHUD();
     save();
     fader.classList.remove('active');
@@ -755,18 +877,87 @@ function updatePrompt() {
 function hidePrompt() {
   promptTarget = null;
   document.getElementById('prompt').classList.add('hidden');
+  cursorLabel.classList.add('hidden');
+  canvas.style.cursor = 'default';
 }
 
-function tryInteract() {
-  if (!promptTarget) return;
-  if (promptTarget.kind === 'npc') {
+function interactWith(tgt) {
+  if (!tgt) return;
+  if (tgt.kind === 'npc') {
     state.tick++;
-    const id = promptTarget.npc.entry();
+    const id = tgt.npc.entry();
     if (id) openDialogue(id);
-  } else {
-    openNarration(promptTarget.hot.text);
+  } else if (tgt.kind === 'hotspot') {
+    openNarration(tgt.hot.text);
   }
 }
+
+function tryInteract() { interactWith(promptTarget); }
+
+/* ---------------- mouse: point-and-click ---------------- */
+function hitAt(wx, wy) {
+  const map = currentMap();
+  for (const n of NPCS) {
+    if (n.map !== state.map) continue;
+    if (Math.hypot((n.x + 0.5) * TILE - wx, (n.y + 0.35) * TILE - wy) < TILE * 0.75)
+      return { kind: 'npc', npc: n };
+  }
+  for (const h of map.hotspots) {
+    if (Math.hypot((h.x + 0.5) * TILE - wx, (h.y + 0.5) * TILE - wy) < TILE * 0.7)
+      return { kind: 'hotspot', hot: h };
+  }
+  const tx = Math.floor(wx / TILE), ty = Math.floor(wy / TILE);
+  if (map.doors[`${tx},${ty}`]) return { kind: 'door', x: tx, y: ty };
+  return null;
+}
+
+canvas.addEventListener('click', (e) => {
+  if (mode !== 'play' || transitioning) return;
+  const c = camera();
+  const wx = e.clientX + c.cx, wy = e.clientY + c.cy;
+  const map = currentMap();
+  const hit = hitAt(wx, wy);
+  if (hit && hit.kind === 'npc') {
+    const n = hit.npc;
+    const rad = Math.max(1, Math.round((n.range || 1.6) - 0.6));
+    walkTo(n.x, n.y, { kind: 'npc', npc: n }, rad);
+  } else if (hit && hit.kind === 'hotspot') {
+    walkTo(hit.hot.x, hit.hot.y, { kind: 'hotspot', hot: hit.hot }, 1);
+  } else if (hit && hit.kind === 'door') {
+    if (walkTo(hit.x, hit.y, null, 0))
+      clickMarker = { x: (hit.x + 0.5) * TILE, y: (hit.y + 0.5) * TILE, t0: performance.now() };
+  } else {
+    const tx = Math.floor(wx / TILE), ty = Math.floor(wy / TILE);
+    if (tx < 0 || ty < 0 || tx >= map.w || ty >= map.h) return;
+    if (SOLID_TILES.has(map.grid[ty][tx])) return;
+    if (walkTo(tx, ty, null, 0))
+      clickMarker = { x: wx, y: wy, t0: performance.now() };
+  }
+});
+
+const cursorLabel = document.getElementById('cursor-label');
+canvas.addEventListener('mousemove', (e) => {
+  if (mode !== 'play') {
+    cursorLabel.classList.add('hidden');
+    canvas.style.cursor = 'default';
+    return;
+  }
+  const c = camera();
+  const hit = hitAt(e.clientX + c.cx, e.clientY + c.cy);
+  if (hit) {
+    cursorLabel.textContent =
+      hit.kind === 'npc' ? 'Talk to ' + hit.npc.name :
+      hit.kind === 'hotspot' ? hit.hot.name :
+      currentMap().outdoor ? 'Enter' : 'Step outside';
+    cursorLabel.style.left = (e.clientX + 14) + 'px';
+    cursorLabel.style.top = (e.clientY + 12) + 'px';
+    cursorLabel.classList.remove('hidden');
+    canvas.style.cursor = 'pointer';
+  } else {
+    cursorLabel.classList.add('hidden');
+    canvas.style.cursor = 'default';
+  }
+});
 
 /* ---------------- dialogue ---------------- */
 const dlgEl = document.getElementById('dialogue');
@@ -1042,6 +1233,7 @@ function startPlay() {
   overlay.innerHTML = '';
   document.getElementById('hud').classList.remove('hidden');
   mode = 'play';
+  snapCamera();
   updateHUD();
   save();
 }
@@ -1092,6 +1284,10 @@ function frame(now) {
   lastT = now;
   const t = now / 1000;
   update(dt, t);
+  // camera trails the player with a soft lag
+  const ck = Math.min(1, dt * 6);
+  cam.x += (player.x - cam.x) * ck;
+  cam.y += (player.y - cam.y) * ck;
   render(t);
   requestAnimationFrame(frame);
 }

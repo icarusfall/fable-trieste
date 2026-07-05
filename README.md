@@ -25,9 +25,14 @@ python -m http.server 8631
 
 ## Controls
 
+Point-and-click, in the classical style: **click** anywhere to walk there
+(pathfinding included); click a person to walk over and talk; click a door to
+enter; hover to see what things are. Keyboard still works throughout:
+
 | Key | Action |
 | --- | --- |
-| WASD / arrow keys | walk |
+| Mouse click | walk / talk / enter / examine |
+| WASD / arrow keys | walk (overrides a clicked path) |
 | E / Enter / Space | talk, interact, advance dialogue |
 | 1–9 | pick a dialogue choice |
 | J | journal (objectives + faction reputation) |
